@@ -1,0 +1,148 @@
+import json
+import sqlite3
+import time
+from pathlib import Path
+from datetime import datetime, timezone
+
+import joblib
+import numpy as np
+import paho.mqtt.client as mqtt
+
+MQTT_BROKER = "localhost"
+MQTT_PORT = 1883
+MQTT_TOPIC_SUB = "smartgrid/+/data"
+MQTT_TOPIC_PUB = "smartgrid/alerts"
+
+MODEL_PATH = Path(__file__).parent / "models" / "random_forest_smartgrid.joblib"
+DB_PATH = Path(__file__).parent / "smartgrid.db"
+
+TEMP_CRITICAL_C = 80.0
+CURRENT_CRITICAL_A = 20.0
+
+
+def init_db():
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS measurements (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            node_id TEXT,
+            timestamp TEXT,
+            current_A REAL,
+            voltage_V REAL,
+            temperature_C REAL,
+            prediction TEXT,
+            confidence REAL
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+
+def save_measurement(node_id, current, voltage, temperature, prediction, confidence):
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute(
+        """INSERT INTO measurements
+           (node_id, timestamp, current_A, voltage_V, temperature_C, prediction, confidence)
+           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+        (
+            node_id,
+            datetime.now(timezone.utc).isoformat(),
+            current,
+            voltage,
+            temperature,
+            prediction,
+            confidence,
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+
+def load_model():
+    if not MODEL_PATH.exists():
+        raise FileNotFoundError(f"Modele introuvable: {MODEL_PATH}")
+    return joblib.load(MODEL_PATH)
+
+
+def build_features(current, voltage, temperature, model_columns):
+    features = {}
+    for col in model_columns:
+        if col.startswith("tau"):
+            features[col] = 5.0
+        elif col.startswith("p"):
+            features[col] = voltage / 10.0
+        elif col.startswith("g"):
+            features[col] = current / 10.0
+        else:
+            features[col] = 0.0
+    return np.array([[features[c] for c in model_columns]])
+
+
+model = None
+model_columns = None
+
+
+def on_connect(client, userdata, flags, rc):
+    print(f"Connecte au broker MQTT (rc={rc}), abonnement a {MQTT_TOPIC_SUB}")
+    client.subscribe(MQTT_TOPIC_SUB)
+
+
+def on_message(client, userdata, msg):
+    try:
+        payload = json.loads(msg.payload.decode())
+    except json.JSONDecodeError:
+        print(f"Message invalide recu sur {msg.topic}: {msg.payload}")
+        return
+
+    node_id = payload.get("node_id", "unknown")
+    current = float(payload.get("current_A", 0))
+    voltage = float(payload.get("voltage_V", 0))
+    temperature = float(payload.get("temperature_C", 0))
+
+    if temperature >= TEMP_CRITICAL_C or current >= CURRENT_CRITICAL_A:
+        prediction = "PANNE"
+        confidence = 1.0
+    else:
+        X = build_features(current, voltage, temperature, model_columns)
+        pred = model.predict(X)[0]
+        proba = model.predict_proba(X)[0]
+        prediction = pred
+        confidence = float(np.max(proba))
+
+    print(f"[{node_id}] I={current:.2f}A V={voltage:.1f}V T={temperature:.1f}C -> {prediction} ({confidence:.2f})")
+
+    save_measurement(node_id, current, voltage, temperature, prediction, confidence)
+
+    alert_payload = json.dumps({
+        "node_id": node_id,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "current_A": current,
+        "voltage_V": voltage,
+        "temperature_C": temperature,
+        "prediction": prediction,
+        "confidence": confidence,
+    })
+    client.publish(MQTT_TOPIC_PUB, alert_payload)
+
+
+def main():
+    global model, model_columns
+
+    init_db()
+    print("Base de donnees SQLite prete.")
+
+    model = load_model()
+    model_columns = list(model.feature_names_in_)
+    print(f"Modele charge. Colonnes attendues: {model_columns}")
+
+    client = mqtt.Client()
+    client.on_connect = on_connect
+    client.on_message = on_message
+
+    client.connect(MQTT_BROKER, MQTT_PORT, keepalive=60)
+    print("Gateway demarree. En attente de messages...")
+    client.loop_forever()
+
+
+if __name__ == "__main__":
+    main()
