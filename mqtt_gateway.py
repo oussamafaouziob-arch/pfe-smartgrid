@@ -8,12 +8,12 @@ import joblib
 import numpy as np
 import paho.mqtt.client as mqtt
 
-MQTT_BROKER = "localhost"
+MQTT_BROKER = "broker.hivemq.com"
 MQTT_PORT = 1883
 MQTT_TOPIC_SUB = "smartgrid/+/data"
 MQTT_TOPIC_PUB = "smartgrid/alerts"
 
-MODEL_PATH = Path(__file__).parent / "models" / "random_forest_smartgrid.joblib"
+MODEL_PATH = Path(__file__).parent / "random_forest_smartgrid.joblib"
 DB_PATH = Path(__file__).parent / "smartgrid.db"
 
 TEMP_CRITICAL_C = 80.0
