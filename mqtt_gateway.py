@@ -1,5 +1,7 @@
 import json
 import sqlite3
+import os
+import threading
 import time
 from pathlib import Path
 from datetime import datetime, timezone
@@ -7,6 +9,7 @@ from datetime import datetime, timezone
 import joblib
 import numpy as np
 import paho.mqtt.client as mqtt
+from flask import Flask, request, jsonify
 
 MQTT_BROKER = "broker.hivemq.com"
 MQTT_PORT = 1883
@@ -21,7 +24,7 @@ CURRENT_CRITICAL_A = 20.0
 
 
 def init_db():
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     conn.execute("""
         CREATE TABLE IF NOT EXISTS measurements (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -39,7 +42,7 @@ def init_db():
 
 
 def save_measurement(node_id, current, voltage, temperature, prediction, confidence):
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     conn.execute(
         """INSERT INTO measurements
            (node_id, timestamp, current_A, voltage_V, temperature_C, prediction, confidence)
@@ -125,7 +128,75 @@ def on_message(client, userdata, msg):
     client.publish(MQTT_TOPIC_PUB, alert_payload)
 
 
-def main():
+# ---------------- API HTTP (pour le dashboard / historique) ----------------
+
+app = Flask(__name__)
+
+
+@app.after_request
+def add_cors_headers(response):
+    # Autorise le dashboard (heberge ailleurs, ex. GitHub Pages) a appeler cette API
+    response.headers["Access-Control-Allow-Origin"] = "*"
+    response.headers["Access-Control-Allow-Headers"] = "Content-Type"
+    response.headers["Access-Control-Allow-Methods"] = "GET, OPTIONS"
+    return response
+
+
+@app.route("/api/health")
+def health():
+    return jsonify({"status": "ok"})
+
+
+@app.route("/api/history")
+def history():
+    """
+    Parametres (query string) :
+      start = date de debut, format YYYY-MM-DD (obligatoire)
+      end   = date de fin, format YYYY-MM-DD (optionnel, sinon = start)
+      node_id = filtrer par noeud (optionnel)
+    Exemple : /api/history?start=2026-06-05&end=2026-06-12
+    """
+    start = request.args.get("start")
+    end = request.args.get("end") or start
+    node_id = request.args.get("node_id")
+
+    if not start:
+        return jsonify({"error": "Le parametre 'start' (YYYY-MM-DD) est requis"}), 400
+
+    start_iso = f"{start}T00:00:00"
+    end_iso = f"{end}T23:59:59"
+
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    query = """
+        SELECT node_id, timestamp, current_A, voltage_V, temperature_C, prediction, confidence
+        FROM measurements
+        WHERE timestamp >= ? AND timestamp <= ?
+    """
+    params = [start_iso, end_iso]
+    if node_id:
+        query += " AND node_id = ?"
+        params.append(node_id)
+    query += " ORDER BY timestamp ASC"
+
+    rows = conn.execute(query, params).fetchall()
+    conn.close()
+
+    results = [dict(r) for r in rows]
+    summary = {"NORMAL": 0, "ANOMALIE": 0, "PANNE": 0}
+    for r in results:
+        if r["prediction"] in summary:
+            summary[r["prediction"]] += 1
+
+    return jsonify({"count": len(results), "summary": summary, "results": results})
+
+
+def run_flask():
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
+
+
+def run_mqtt():
     global model, model_columns
 
     init_db()
@@ -142,6 +213,15 @@ def main():
     client.connect(MQTT_BROKER, MQTT_PORT, keepalive=60)
     print("Gateway demarree. En attente de messages...")
     client.loop_forever()
+
+
+def main():
+    # Lance le serveur API (Flask) dans un thread separe,
+    # et la boucle MQTT dans le thread principal
+    flask_thread = threading.Thread(target=run_flask, daemon=True)
+    flask_thread.start()
+    time.sleep(1)
+    run_mqtt()
 
 
 if __name__ == "__main__":
