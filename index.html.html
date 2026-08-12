@@ -1,0 +1,419 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SmartGrid — Poste de Surveillance</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet">
+<script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
+<style>
+  :root {
+    --bg: #0b0f14;
+    --panel: #11161d;
+    --panel-border: #1e2733;
+    --line: #1c2530;
+    --amber: #e8a33d;
+    --amber-dim: #6b5225;
+    --cyan: #4fd1c5;
+    --cyan-dim: #1f4a47;
+    --red: #ef5350;
+    --red-dim: #4a1f1e;
+    --text: #dfe6ed;
+    --text-dim: #6f7d8c;
+    --text-faint: #3d4753;
+    --font-display: 'Space Grotesk', sans-serif;
+    --font-mono: 'IBM Plex Mono', monospace;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: var(--bg);
+    background-image:
+      radial-gradient(circle at 15% 10%, rgba(79,209,197,0.04), transparent 40%),
+      radial-gradient(circle at 85% 90%, rgba(232,163,61,0.04), transparent 40%);
+    color: var(--text);
+    font-family: var(--font-mono);
+    min-height: 100vh;
+    padding: 28px 20px 60px;
+  }
+
+  .wrap { max-width: 1080px; margin: 0 auto; }
+
+  /* ---------- Header ---------- */
+  header {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-end;
+    border-bottom: 1px solid var(--line);
+    padding-bottom: 18px;
+    margin-bottom: 28px;
+    flex-wrap: wrap;
+    gap: 14px;
+  }
+  .brand-eyebrow {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    letter-spacing: 0.18em;
+    color: var(--amber);
+    text-transform: uppercase;
+    margin-bottom: 6px;
+  }
+  .brand-title {
+    font-family: var(--font-display);
+    font-size: 28px;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+  }
+  .brand-title span { color: var(--text-dim); font-weight: 400; }
+
+  .conn-status {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    font-size: 12px;
+    letter-spacing: 0.04em;
+    color: var(--text-dim);
+    padding: 7px 14px;
+    border: 1px solid var(--line);
+    border-radius: 3px;
+    background: var(--panel);
+  }
+  .dot {
+    width: 8px; height: 8px; border-radius: 50%;
+    background: var(--text-faint);
+    box-shadow: 0 0 0 0 rgba(0,0,0,0);
+    transition: background 0.3s, box-shadow 0.3s;
+  }
+  .dot.live {
+    background: var(--cyan);
+    box-shadow: 0 0 8px 1px rgba(79,209,197,0.6);
+    animation: blink 2s ease-in-out infinite;
+  }
+  .dot.down { background: var(--red); box-shadow: 0 0 8px 1px rgba(239,83,80,0.6); }
+  @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0.35} }
+
+  /* ---------- Gauge grid ---------- */
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 16px;
+    margin-bottom: 20px;
+  }
+  @media (max-width: 720px) { .grid { grid-template-columns: 1fr; } }
+
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--panel-border);
+    border-radius: 4px;
+    padding: 20px 22px 22px;
+    position: relative;
+    overflow: hidden;
+  }
+  .panel::before {
+    content: '';
+    position: absolute; top: 0; left: 0; right: 0; height: 2px;
+    background: linear-gradient(90deg, var(--accent, var(--cyan)), transparent 70%);
+    opacity: 0.7;
+  }
+  .panel-label {
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: var(--text-dim);
+    display: flex;
+    justify-content: space-between;
+    margin-bottom: 14px;
+  }
+  .panel-label b { color: var(--text-faint); font-weight: 500; }
+
+  .reading {
+    font-family: var(--font-mono);
+    font-weight: 600;
+    font-size: 40px;
+    line-height: 1;
+    color: var(--text);
+    letter-spacing: -0.01em;
+  }
+  .reading .unit { font-size: 15px; color: var(--text-dim); margin-left: 6px; font-weight: 400; }
+
+  .bar-track {
+    margin-top: 16px;
+    height: 5px;
+    background: #182028;
+    border-radius: 3px;
+    overflow: hidden;
+  }
+  .bar-fill {
+    height: 100%;
+    width: 0%;
+    background: var(--accent, var(--cyan));
+    transition: width 0.6s cubic-bezier(.4,0,.2,1), background 0.4s;
+    box-shadow: 0 0 8px 0 var(--accent, var(--cyan));
+  }
+  .bar-range {
+    display: flex; justify-content: space-between;
+    font-size: 10px; color: var(--text-faint); margin-top: 6px;
+    letter-spacing: 0.04em;
+  }
+
+  #panel-current { --accent: var(--cyan); }
+  #panel-voltage { --accent: var(--cyan); }
+  #panel-temp    { --accent: var(--amber); }
+
+  /* ---------- Status banner ---------- */
+  .status-banner {
+    background: var(--panel);
+    border: 1px solid var(--panel-border);
+    border-left: 3px solid var(--cyan);
+    border-radius: 4px;
+    padding: 18px 22px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 20px;
+    transition: border-color 0.4s;
+    flex-wrap: wrap;
+    gap: 10px;
+  }
+  .status-banner.state-anomalie { border-left-color: var(--amber); }
+  .status-banner.state-panne { border-left-color: var(--red); }
+
+  .status-left { display: flex; align-items: center; gap: 14px; }
+  .status-badge {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    letter-spacing: 0.1em;
+    padding: 6px 12px;
+    border-radius: 3px;
+    background: var(--cyan-dim);
+    color: var(--cyan);
+    font-weight: 600;
+  }
+  .status-banner.state-anomalie .status-badge { background: var(--amber-dim); color: var(--amber); }
+  .status-banner.state-panne .status-badge { background: var(--red-dim); color: var(--red); }
+
+  .status-desc { font-size: 12.5px; color: var(--text-dim); }
+  .status-meta { font-size: 11px; color: var(--text-faint); letter-spacing: 0.03em; }
+
+  /* ---------- Log ---------- */
+  .log-panel {
+    background: var(--panel);
+    border: 1px solid var(--panel-border);
+    border-radius: 4px;
+    padding: 18px 22px 8px;
+  }
+  .log-header {
+    font-size: 10.5px; letter-spacing: 0.16em; text-transform: uppercase;
+    color: var(--text-dim); margin-bottom: 12px;
+    display: flex; justify-content: space-between;
+  }
+  .log-list {
+    max-height: 220px;
+    overflow-y: auto;
+    font-size: 12px;
+  }
+  .log-row {
+    display: grid;
+    grid-template-columns: 78px 60px 1fr 90px;
+    gap: 12px;
+    padding: 7px 0;
+    border-bottom: 1px solid var(--line);
+    color: var(--text-dim);
+    align-items: center;
+  }
+  .log-row:last-child { border-bottom: none; }
+  .log-row .t { color: var(--text-faint); }
+  .log-row .tag {
+    font-size: 10px; letter-spacing: 0.06em; padding: 2px 7px;
+    border-radius: 2px; text-align: center; font-weight: 600;
+  }
+  .tag.NORMAL { background: var(--cyan-dim); color: var(--cyan); }
+  .tag.ANOMALIE { background: var(--amber-dim); color: var(--amber); }
+  .tag.PANNE { background: var(--red-dim); color: var(--red); }
+  .log-row .vals { color: var(--text); }
+  .log-empty { color: var(--text-faint); font-size: 12px; padding: 20px 0; text-align: center; }
+
+  .log-list::-webkit-scrollbar { width: 6px; }
+  .log-list::-webkit-scrollbar-thumb { background: var(--panel-border); border-radius: 3px; }
+
+  footer {
+    margin-top: 26px;
+    font-size: 10.5px;
+    color: var(--text-faint);
+    letter-spacing: 0.03em;
+    text-align: center;
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <div>
+      <div class="brand-eyebrow">PFE — Électronique Embarquée</div>
+      <div class="brand-title">SmartGrid <span>/ Poste de surveillance</span></div>
+    </div>
+    <div class="conn-status">
+      <span class="dot" id="connDot"></span>
+      <span id="connText">Connexion...</span>
+    </div>
+  </header>
+
+  <div class="grid">
+    <div class="panel" id="panel-current">
+      <div class="panel-label"><span>Courant</span><b>NODE 1</b></div>
+      <div class="reading"><span id="valCurrent">--</span><span class="unit">A</span></div>
+      <div class="bar-track"><div class="bar-fill" id="barCurrent"></div></div>
+      <div class="bar-range"><span>0</span><span>30 A</span></div>
+    </div>
+
+    <div class="panel" id="panel-voltage">
+      <div class="panel-label"><span>Tension</span><b>NODE 1</b></div>
+      <div class="reading"><span id="valVoltage">--</span><span class="unit">V</span></div>
+      <div class="bar-track"><div class="bar-fill" id="barVoltage"></div></div>
+      <div class="bar-range"><span>0</span><span>250 V</span></div>
+    </div>
+
+    <div class="panel" id="panel-temp">
+      <div class="panel-label"><span>Température</span><b>NODE 1</b></div>
+      <div class="reading"><span id="valTemp">--</span><span class="unit">°C</span></div>
+      <div class="bar-track"><div class="bar-fill" id="barTemp"></div></div>
+      <div class="bar-range"><span>0</span><span>100 °C</span></div>
+    </div>
+  </div>
+
+  <div class="status-banner state-normal" id="statusBanner">
+    <div class="status-left">
+      <span class="status-badge" id="statusBadge">EN ATTENTE</span>
+      <span class="status-desc" id="statusDesc">En attente du premier message du système...</span>
+    </div>
+    <span class="status-meta" id="statusMeta">confiance —</span>
+  </div>
+
+  <div class="log-panel">
+    <div class="log-header"><span>Journal des événements</span><span id="logCount">0 messages</span></div>
+    <div class="log-list" id="logList">
+      <div class="log-empty">Aucun événement reçu pour le moment.</div>
+    </div>
+  </div>
+
+  <footer>broker.hivemq.com · topic smartgrid/alerts · rafraîchi en temps réel via MQTT/WebSocket</footer>
+</div>
+
+<script>
+const MQTT_URL = "wss://broker.hivemq.com:8884/mqtt";
+const TOPIC = "smartgrid/alerts";
+
+const connDot = document.getElementById('connDot');
+const connText = document.getElementById('connText');
+const statusBanner = document.getElementById('statusBanner');
+const statusBadge = document.getElementById('statusBadge');
+const statusDesc = document.getElementById('statusDesc');
+const statusMeta = document.getElementById('statusMeta');
+const logList = document.getElementById('logList');
+const logCount = document.getElementById('logCount');
+
+let msgCount = 0;
+const logs = [];
+
+function setBar(id, value, max) {
+  const pct = Math.max(0, Math.min(100, (value / max) * 100));
+  document.getElementById(id).style.width = pct + '%';
+}
+
+function fmtTime(iso) {
+  try {
+    const d = new Date(iso);
+    return d.toLocaleTimeString('fr-FR', { hour12: false });
+  } catch(e) { return '--:--:--'; }
+}
+
+const descriptions = {
+  NORMAL: "Réseau stable, aucune anomalie détectée.",
+  ANOMALIE: "Marge de stabilité réduite — à surveiller.",
+  PANNE: "Seuil critique dépassé, risque de coupure."
+};
+
+function handlePayload(data) {
+  msgCount++;
+
+  const current = Number(data.current_A ?? 0);
+  const voltage = Number(data.voltage_V ?? 0);
+  const temp = Number(data.temperature_C ?? 0);
+  const prediction = data.prediction || 'NORMAL';
+  const confidence = data.confidence != null ? (data.confidence * 100).toFixed(0) + '%' : '—';
+
+  document.getElementById('valCurrent').textContent = current.toFixed(2);
+  document.getElementById('valVoltage').textContent = voltage.toFixed(1);
+  document.getElementById('valTemp').textContent = temp.toFixed(1);
+
+  setBar('barCurrent', current, 30);
+  setBar('barVoltage', voltage, 250);
+  setBar('barTemp', temp, 100);
+
+  statusBanner.className = 'status-banner state-' + prediction.toLowerCase();
+  statusBadge.textContent = prediction;
+  statusDesc.textContent = descriptions[prediction] || '';
+  statusMeta.textContent = 'confiance ' + confidence + ' · ' + (data.node_id || '');
+
+  logs.unshift({
+    time: fmtTime(data.timestamp),
+    prediction,
+    current, voltage, temp
+  });
+  if (logs.length > 25) logs.pop();
+  renderLog();
+}
+
+function renderLog() {
+  logCount.textContent = msgCount + ' messages';
+  if (logs.length === 0) {
+    logList.innerHTML = '<div class="log-empty">Aucun événement reçu pour le moment.</div>';
+    return;
+  }
+  logList.innerHTML = logs.map(l => `
+    <div class="log-row">
+      <span class="t">${l.time}</span>
+      <span class="tag ${l.prediction}">${l.prediction}</span>
+      <span class="vals">I=${l.current.toFixed(2)}A &nbsp; V=${l.voltage.toFixed(1)}V &nbsp; T=${l.temp.toFixed(1)}°C</span>
+    </div>
+  `).join('');
+}
+
+const client = mqtt.connect(MQTT_URL, { clientId: 'smartgrid-web-' + Math.random().toString(16).slice(2) });
+
+client.on('connect', () => {
+  connDot.className = 'dot live';
+  connText.textContent = 'Connecté — en direct';
+  client.subscribe(TOPIC);
+});
+
+client.on('reconnect', () => {
+  connDot.className = 'dot';
+  connText.textContent = 'Reconnexion...';
+});
+
+client.on('error', () => {
+  connDot.className = 'dot down';
+  connText.textContent = 'Erreur de connexion';
+});
+
+client.on('close', () => {
+  connDot.className = 'dot down';
+  connText.textContent = 'Déconnecté';
+});
+
+client.on('message', (topic, message) => {
+  try {
+    const data = JSON.parse(message.toString());
+    handlePayload(data);
+  } catch (e) {
+    console.error('Message invalide', e);
+  }
+});
+</script>
+</body>
+</html>
