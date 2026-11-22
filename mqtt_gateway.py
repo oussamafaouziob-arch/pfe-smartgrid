@@ -3,6 +3,7 @@ import sqlite3
 import os
 import threading
 import time
+from collections import deque, defaultdict
 from pathlib import Path
 from datetime import datetime, timezone
 
@@ -81,6 +82,89 @@ def build_features(current, voltage, temperature, model_columns):
     return np.array([[features[c] for c in model_columns]])
 
 
+# ---------------- ALERTE PRECOCE PAR TENDANCE ----------------
+# Idee : au lieu d'attendre que le seuil soit depasse, on estime "dans combien
+# de minutes" il sera atteint si la tendance actuelle continue (extrapolation
+# lineaire sur les derniers points). Ce n'est PAS un modele de ML de prevision.
+
+WINDOW_SIZE = 12          # nombre de dernieres mesures gardees par noeud (12 x 5 s = 1 min)
+MIN_POINTS = 6            # nombre minimal de mesures avant de calculer une tendance
+HORIZON_MAX_MIN = 120     # au-dela de 2 h, on considere qu'il n'y a pas de risque proche
+WARN_ATTENTION_MIN = 30   # niveau ATTENTION si seuil estime dans 30 min ou moins
+WARN_ALERTE_MIN = 15      # niveau ALERTE si seuil estime dans 15 min ou moins
+MIN_SLOPE_TEMP = 0.05     # pente minimale (degC/min) pour parler de "tendance a la hausse"
+MIN_SLOPE_CURRENT = 0.02  # pente minimale (A/min)
+
+# historique recent par noeud : liste de (temps_en_secondes, temperature, courant)
+recent_points = defaultdict(lambda: deque(maxlen=WINDOW_SIZE))
+
+
+def fit_trend(points, index):
+    """Regression lineaire sur la fenetre. Retourne (pente par minute, valeur lissee actuelle)."""
+    t0 = points[0][0]
+    xs = np.array([(p[0] - t0) / 60.0 for p in points])
+    ys = np.array([p[index] for p in points])
+    if np.ptp(xs) < 1e-6:
+        return None, None
+    slope, intercept = np.polyfit(xs, ys, 1)
+    smoothed_now = slope * xs[-1] + intercept
+    return float(slope), float(smoothed_now)
+
+
+def minutes_to_threshold(slope, value, threshold, min_slope):
+    """Temps estime (minutes) avant d'atteindre le seuil, ou None si pas de risque."""
+    if slope is None or slope < min_slope:
+        return None
+    if value >= threshold:
+        return None  # deja au-dessus : c'est l'etat PANNE qui s'en charge
+    eta = (threshold - value) / slope
+    if eta > HORIZON_MAX_MIN:
+        return None
+    return eta
+
+
+def analyze_trend(node_id, temperature, current):
+    """Met a jour l'historique du noeud et retourne l'etat de l'alerte precoce."""
+    points = recent_points[node_id]
+    points.append((time.time(), temperature, current))
+
+    result = {
+        "warning_level": "NONE",
+        "eta_min": None,
+        "eta_cause": None,
+        "trend_temp_per_min": None,
+        "trend_current_per_min": None,
+    }
+    if len(points) < MIN_POINTS:
+        return result
+
+    pts = list(points)
+    slope_t, smooth_t = fit_trend(pts, 1)
+    slope_i, smooth_i = fit_trend(pts, 2)
+    result["trend_temp_per_min"] = None if slope_t is None else round(slope_t, 2)
+    result["trend_current_per_min"] = None if slope_i is None else round(slope_i, 3)
+
+    eta_t = minutes_to_threshold(slope_t, smooth_t, TEMP_CRITICAL_C, MIN_SLOPE_TEMP)
+    eta_i = minutes_to_threshold(slope_i, smooth_i, CURRENT_CRITICAL_A, MIN_SLOPE_CURRENT)
+
+    candidates = []
+    if eta_t is not None:
+        candidates.append((eta_t, "temperature"))
+    if eta_i is not None:
+        candidates.append((eta_i, "courant"))
+    if not candidates:
+        return result
+
+    eta, cause = min(candidates)
+    result["eta_min"] = round(eta, 1)
+    result["eta_cause"] = cause
+    if eta <= WARN_ALERTE_MIN:
+        result["warning_level"] = "ALERTE"
+    elif eta <= WARN_ATTENTION_MIN:
+        result["warning_level"] = "ATTENTION"
+    return result
+
+
 model = None
 model_columns = None
 
@@ -112,7 +196,11 @@ def on_message(client, userdata, msg):
         prediction = pred
         confidence = float(np.max(proba))
 
-    print(f"[{node_id}] I={current:.2f}A V={voltage:.1f}V T={temperature:.1f}C -> {prediction} ({confidence:.2f})")
+    trend = analyze_trend(node_id, temperature, current)
+
+    print(f"[{node_id}] I={current:.2f}A V={voltage:.1f}V T={temperature:.1f}C -> {prediction} ({confidence:.2f})"
+          f" | alerte precoce: {trend['warning_level']}"
+          + (f" (seuil dans {trend['eta_min']} min, cause: {trend['eta_cause']})" if trend["eta_min"] is not None else ""))
 
     save_measurement(node_id, current, voltage, temperature, prediction, confidence)
 
@@ -124,6 +212,11 @@ def on_message(client, userdata, msg):
         "temperature_C": temperature,
         "prediction": prediction,
         "confidence": confidence,
+        "warning_level": trend["warning_level"],
+        "eta_min": trend["eta_min"],
+        "eta_cause": trend["eta_cause"],
+        "trend_temp_per_min": trend["trend_temp_per_min"],
+        "trend_current_per_min": trend["trend_current_per_min"],
     })
     client.publish(MQTT_TOPIC_PUB, alert_payload)
 
