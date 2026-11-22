@@ -516,6 +516,7 @@ function handlePayload(data) {
 
   updateEarlyWarning(data);
     if (window.updateInsights) updateInsights(data);
+    if (window.updateOps) updateOps(data);
 
   logs.unshift({ time: fmtTime(data.timestamp), prediction, current, voltage, temp });
   if (logs.length > 25) logs.pop();
@@ -760,6 +761,180 @@ async function restoreRecent() {
   }
 }
 restoreRecent();
+  // ================== OPS : recommandation d'action + journal d'alarmes ==================
+(function () {
+  const css = `
+    .tag.ATTENTION { background: var(--amber-dim); color: var(--amber); }
+    .tag.ALERTE { background: var(--red-dim); color: var(--red); }
+    .reco { background: var(--panel); border: 1px solid var(--panel-border); border-left: 3px solid var(--blue);
+            border-radius: 6px; padding: 16px 22px; margin-bottom: 20px; box-shadow: 0 1px 2px rgba(22,35,58,0.04); }
+    .reco.reco-warn { border-left-color: var(--amber); }
+    .reco.reco-bad { border-left-color: var(--red); }
+    .reco-title { font-size: 10.5px; letter-spacing: 0.16em; text-transform: uppercase; color: var(--text-dim); margin-bottom: 8px; }
+    .reco-row { display: grid; grid-template-columns: 96px 1fr; gap: 12px; padding: 4px 0; font-size: 12.5px; color: var(--text-dim); }
+    .reco-k { font-size: 10.5px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--text-faint); padding-top: 2px; }
+    .reco-action { color: var(--text); font-weight: 600; }
+    .al-tools { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
+    .al-tools select { font-family: var(--font-mono); font-size: 12px; padding: 6px 8px; border: 1px solid var(--panel-border);
+                       border-radius: 4px; background: #fbfdff; color: var(--text); }
+    .al-row { display: grid; grid-template-columns: 150px 90px 110px 1fr; gap: 12px; padding: 7px 0;
+              border-bottom: 1px solid var(--line); color: var(--text-dim); align-items: center; }
+    .al-row:last-child { border-bottom: none; }
+    @media (max-width: 720px) { .al-row { grid-template-columns: 1fr; gap: 4px; } }
+  `;
+  const style = document.createElement('style');
+  style.textContent = css;
+  document.head.appendChild(style);
+
+  const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+  // ---------- Recommandation d'action (Détecter -> Diagnostiquer -> Agir) ----------
+  const reco = document.createElement('div');
+  reco.className = 'reco';
+  reco.innerHTML = `
+    <div class="reco-title">Recommandation d'action</div>
+    <div class="reco-row"><span class="reco-k">Détecté</span><span id="recoDetect">En attente de données...</span></div>
+    <div class="reco-row"><span class="reco-k">Diagnostic</span><span id="recoDiag">—</span></div>
+    <div class="reco-row"><span class="reco-k">Action</span><span class="reco-action" id="recoAction">—</span></div>`;
+  document.getElementById('earlyBox').after(reco);
+
+  function recommend(d) {
+    const T = Number(d.temperature_C ?? 0), I = Number(d.current_A ?? 0), V = Number(d.voltage_V ?? 0);
+    const state = d.prediction || 'NORMAL', level = d.warning_level || 'NONE';
+    const detect = 'T = ' + T.toFixed(1) + ' °C · I = ' + I.toFixed(2) + ' A · V = ' + V.toFixed(0) + ' V (état ' + state + ')';
+    let sev = 'ok', diag, action;
+
+    if (T >= 80 || I >= 20) {
+      sev = 'bad';
+      const parts = [];
+      if (T >= 80) parts.push('surchauffe (≥ 80 °C)');
+      if (I >= 20) parts.push('surintensité (≥ 20 A)');
+      diag = 'Seuil critique dépassé : ' + parts.join(' + ') + '.';
+      action = 'URGENT : ' + (T >= 80 ? 'délester la charge et vérifier le refroidissement. ' : '')
+             + (I >= 20 ? 'réduire la charge et rechercher une surcharge ou un court-circuit. ' : '')
+             + 'Envisager d\'isoler le départ si la valeur ne baisse pas.';
+    } else if (level === 'ALERTE' || level === 'ATTENTION') {
+      sev = level === 'ALERTE' ? 'bad' : 'warn';
+      const what = d.eta_cause === 'courant' ? 'courant (20 A)' : 'température (80 °C)';
+      const eta = d.eta_min != null ? ' dans ≈ ' + Number(d.eta_min).toFixed(0) + ' min' : '';
+      diag = 'Tendance à la hausse : seuil de ' + what + ' estimé' + eta + '.';
+      action = d.eta_cause === 'courant'
+        ? 'Vérifier les charges connectées et répartir la charge avant le seuil.'
+        : 'Vérifier le refroidissement et réduire la charge avant le seuil.';
+      if (level === 'ALERTE') action = 'Intervenir maintenant : ' + action.charAt(0).toLowerCase() + action.slice(1);
+    } else if (state === 'ANOMALIE') {
+      sev = 'warn';
+      diag = 'Marge de stabilité réduite détectée par le modèle (aucun seuil dépassé).';
+      action = 'Planifier une inspection préventive et surveiller l\'évolution.';
+    } else {
+      diag = 'Aucune anomalie ni tendance dangereuse.';
+      action = 'Aucune action requise : surveillance continue.';
+    }
+    return { sev, detect, diag, action };
+  }
+
+  // ---------- Journal d'alarmes ----------
+  const panel = document.createElement('div');
+  panel.className = 'log-panel';
+  panel.style.marginTop = '20px';
+  panel.innerHTML = `
+    <div class="log-header"><span>Journal d'alarmes</span><span id="alCount">0 événement</span></div>
+    <div class="al-tools">
+      <select id="alType">
+        <option value="">Tous les types</option>
+        <option>PANNE</option><option>ALERTE</option><option>ATTENTION</option><option>ANOMALIE</option><option>NORMAL</option>
+      </select>
+      <select id="alNode"><option value="">Tous les nœuds</option></select>
+      <button class="preset-btn" id="alExport">Exporter CSV</button>
+      <button class="preset-btn" id="alClear">Effacer</button>
+    </div>
+    <div class="log-list" id="alList"></div>`;
+  document.querySelector('.log-panel').after(panel);
+
+  const KEY = 'sg_alarms_v1', MAX = 200;
+  let alarms = [];
+  try { alarms = JSON.parse(localStorage.getItem(KEY) || '[]'); } catch (e) { alarms = []; }
+  const lastType = {};
+  const save = () => { try { localStorage.setItem(KEY, JSON.stringify(alarms)); } catch (e) {} };
+
+  const fType = document.getElementById('alType');
+  const fNode = document.getElementById('alNode');
+
+  function filtered() {
+    return alarms.filter(a => (!fType.value || a.type === fType.value) && (!fNode.value || a.node === fNode.value));
+  }
+  function refreshNodes() {
+    const keep = fNode.value;
+    const nodes = [...new Set(alarms.map(a => a.node))];
+    fNode.innerHTML = '<option value="">Tous les nœuds</option>' + nodes.map(n => '<option>' + esc(n) + '</option>').join('');
+    fNode.value = nodes.includes(keep) ? keep : '';
+  }
+  function render() {
+    const rows = filtered();
+    document.getElementById('alCount').textContent = rows.length + (rows.length > 1 ? ' événements' : ' événement');
+    document.getElementById('alList').innerHTML = rows.length
+      ? rows.map(a => '<div class="al-row"><span class="t">' + esc(new Date(a.ts).toLocaleString('fr-FR')) + '</span>'
+          + '<span class="tag ' + esc(a.type) + '">' + esc(a.type) + '</span>'
+          + '<span>' + esc(a.node) + '</span><span class="vals">' + esc(a.msg) + '</span></div>').join('')
+      : '<div class="log-empty">Aucune alarme enregistrée.</div>';
+  }
+  const csvCell = s => { s = String(s); if (/^[=+\-@]/.test(s)) s = "'" + s; return '"' + s.replace(/"/g, '""') + '"'; };
+  function exportCsv() {
+    const lines = ['horodatage;noeud;type;message'].concat(
+      filtered().map(a => [a.ts, a.node, a.type, a.msg].map(csvCell).join(';')));
+    const blob = new Blob(['\uFEFF' + lines.join('\r\n')], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = 'alarmes_smartgrid_' + new Date().toISOString().slice(0, 10) + '.csv';
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+  }
+  fType.addEventListener('change', render);
+  fNode.addEventListener('change', render);
+  document.getElementById('alExport').addEventListener('click', exportCsv);
+  document.getElementById('alClear').addEventListener('click', () => {
+    if (confirm('Effacer tout le journal d\'alarmes ?')) { alarms = []; save(); refreshNodes(); render(); }
+  });
+
+  function alarmType(d) {
+    if ((d.prediction || 'NORMAL') === 'PANNE') return 'PANNE';
+    if (d.warning_level === 'ALERTE') return 'ALERTE';
+    if (d.warning_level === 'ATTENTION') return 'ATTENTION';
+    if (d.prediction === 'ANOMALIE') return 'ANOMALIE';
+    return 'NORMAL';
+  }
+  function logAlarm(d) {
+    const node = d.node_id || 'node';
+    const type = alarmType(d);
+    const prev = lastType[node];
+    lastType[node] = type;
+    if (prev === type || (prev === undefined && type === 'NORMAL')) return;   // on log seulement les changements d'état
+    let msg = 'T=' + Number(d.temperature_C ?? 0).toFixed(1) + ' °C · I=' + Number(d.current_A ?? 0).toFixed(2)
+            + ' A · V=' + Number(d.voltage_V ?? 0).toFixed(0) + ' V';
+    if ((type === 'ALERTE' || type === 'ATTENTION') && d.eta_min != null) msg += ' · seuil (' + d.eta_cause + ') dans ' + d.eta_min + ' min';
+    if (type === 'NORMAL') msg = 'Retour à la normale · ' + msg;
+    alarms.unshift({ ts: d.timestamp || new Date().toISOString(), node, type, msg });
+    if (alarms.length > MAX) alarms.length = MAX;
+    save();
+    refreshNodes();
+    render();
+  }
+
+  window.updateOps = function (data) {
+    const r = recommend(data);
+    reco.className = 'reco reco-' + r.sev;
+    document.getElementById('recoDetect').textContent = r.detect;
+    document.getElementById('recoDiag').textContent = r.diag;
+    document.getElementById('recoAction').textContent = r.action;
+    logAlarm(data);
+  };
+
+  refreshNodes();
+  render();
+})();
 </script>
 </body>
 </html>
