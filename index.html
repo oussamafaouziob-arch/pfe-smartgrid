@@ -203,6 +203,33 @@
   .status-desc { font-size: 12.5px; color: var(--text-dim); }
   .status-meta { font-size: 11px; color: var(--text-faint); letter-spacing: 0.03em; }
 
+
+  /* ---------- Alerte précoce (tendance) ---------- */
+  .early-warning {
+    background: var(--panel);
+    border: 1px solid var(--panel-border);
+    border-left: 3px solid var(--blue);
+    border-radius: 6px;
+    padding: 16px 22px;
+    display: flex; align-items: center; justify-content: space-between;
+    margin-bottom: 20px;
+    transition: border-color 0.4s;
+    flex-wrap: wrap; gap: 10px;
+    box-shadow: 0 1px 2px rgba(22,35,58,0.04);
+  }
+  .early-warning.level-attention { border-left-color: var(--amber); }
+  .early-warning.level-alerte { border-left-color: var(--red); }
+  .ew-left { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+  .ew-badge {
+    font-size: 11px; letter-spacing: 0.1em; padding: 6px 12px; border-radius: 3px;
+    background: var(--blue-dim); color: var(--blue); font-weight: 600;
+  }
+  .early-warning.level-attention .ew-badge { background: var(--amber-dim); color: var(--amber); }
+  .early-warning.level-alerte .ew-badge { background: var(--red-dim); color: var(--red); }
+  .ew-title { font-size: 10.5px; letter-spacing: 0.16em; text-transform: uppercase; color: var(--text-dim); }
+  .ew-desc { font-size: 12.5px; color: var(--text-dim); }
+  .ew-meta { font-size: 11px; color: var(--text-faint); letter-spacing: 0.03em; }
+
   .log-panel {
     background: var(--panel); border: 1px solid var(--panel-border); border-radius: 6px;
     padding: 18px 22px 8px; box-shadow: 0 1px 2px rgba(22,35,58,0.04);
@@ -334,6 +361,15 @@
       <span class="status-meta" id="statusMeta">confiance —</span>
     </div>
 
+    <div class="early-warning level-none" id="earlyBox">
+      <div class="ew-left">
+        <span class="ew-title">Alerte précoce</span>
+        <span class="ew-badge" id="ewBadge">EN ATTENTE</span>
+        <span class="ew-desc" id="ewDesc">Analyse de la tendance en cours...</span>
+      </div>
+      <span class="ew-meta" id="ewMeta">tendance —</span>
+    </div>
+
     <div class="log-panel">
       <div class="log-header"><span>Journal des événements (session en cours)</span><span id="logCount">0 messages</span></div>
       <div class="log-list" id="logList">
@@ -389,7 +425,7 @@
 // Remplace par l'URL publique de ta gateway sur Railway, ex :
 // "https://pfe-smartgrid-production.up.railway.app"
 const CONFIG = {
-  API_URL: "https://pfe-smartgrid-production-655afbf9.up.railway.app"
+  API_URL: "https://pfe-smartgrid-production-8eca.up.railway.app"
 };
 // ====================================================
 
@@ -422,6 +458,41 @@ const descriptions = {
   PANNE: "Seuil critique dépassé, risque de coupure."
 };
 
+
+function fmtTrend(v, unit) {
+  if (v === null || v === undefined) return "—";
+  return (v > 0 ? "+" : "") + v + " " + unit;
+}
+
+function fmtEta(m) {
+  if (m < 1) return "moins de 1 min";
+  return m.toFixed(1) + " min";
+}
+
+function updateEarlyWarning(data) {
+  const level = data.warning_level || "NONE";
+  const box = document.getElementById("earlyBox");
+  const badge = document.getElementById("ewBadge");
+  const desc = document.getElementById("ewDesc");
+  const meta = document.getElementById("ewMeta");
+
+  box.className = "early-warning level-" + level.toLowerCase();
+
+  if (level === "NONE") {
+    badge.textContent = "AUCUN RISQUE PROCHE";
+    if (data.eta_min !== null && data.eta_min !== undefined) {
+      desc.textContent = "Tendance à la hausse, seuil estimé dans " + fmtEta(data.eta_min) + ".";
+    } else {
+      desc.textContent = "Aucune tendance dangereuse détectée.";
+    }
+  } else {
+    badge.textContent = level === "ALERTE" ? "ALERTE" : "ATTENTION";
+    const what = data.eta_cause === "courant" ? "courant (20 A)" : "température (80 °C)";
+    desc.textContent = "Seuil de " + what + " estimé dans " + fmtEta(data.eta_min) + ".";
+  }
+  meta.textContent = "T : " + fmtTrend(data.trend_temp_per_min, "°C/min") + "  ·  I : " + fmtTrend(data.trend_current_per_min, "A/min");
+}
+
 function handlePayload(data) {
   msgCount++;
   const current = Number(data.current_A ?? 0);
@@ -441,6 +512,8 @@ function handlePayload(data) {
   statusBadge.textContent = prediction;
   statusDesc.textContent = descriptions[prediction] || '';
   statusMeta.textContent = 'confiance ' + confidence + ' · ' + (data.node_id || '');
+
+  updateEarlyWarning(data);
 
   logs.unshift({ time: fmtTime(data.timestamp), prediction, current, voltage, temp });
   if (logs.length > 25) logs.pop();
