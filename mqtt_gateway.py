@@ -38,7 +38,7 @@ def init_db():
             confidence REAL
         )
     """)
-        conn.execute("""
+    conn.execute("""
         CREATE TABLE IF NOT EXISTS alarms (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             node_id TEXT,
