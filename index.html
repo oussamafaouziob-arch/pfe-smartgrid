@@ -923,13 +923,25 @@ restoreRecent();
     render();
   }
 
-  window.updateOps = function (data) {
+    // --- Journal côté serveur : on lit /api/alarms (au lieu de localStorage) ---
+  document.getElementById('alClear').style.display = 'none';   // effacer n'a pas de sens côté serveur
+  async function loadAlarms() {
+    try {
+      const res = await fetch(CONFIG.API_URL + '/api/alarms?limit=200');
+      const data = await res.json();
+      alarms = (data.results || []).map(r => ({ ts: r.timestamp, node: r.node_id, type: r.type, msg: r.message }));
+      refreshNodes();
+      render();
+    } catch (e) { /* on garde l'affichage actuel */ }
+  }
+  loadAlarms();
+  setInterval(loadAlarms, 5000);window.updateOps = function (data) {
     const r = recommend(data);
     reco.className = 'reco reco-' + r.sev;
     document.getElementById('recoDetect').textContent = r.detect;
     document.getElementById('recoDiag').textContent = r.diag;
     document.getElementById('recoAction').textContent = r.action;
-    logAlarm(data);
+    
   };
 
   refreshNodes();
