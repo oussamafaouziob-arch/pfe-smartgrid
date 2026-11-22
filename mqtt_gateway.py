@@ -3,6 +3,7 @@ import sqlite3
 import os
 import threading
 import time
+from collections import deque
 from pathlib import Path
 from datetime import datetime, timezone
 
@@ -21,6 +22,11 @@ DB_PATH = Path(__file__).parent / "smartgrid.db"
 
 TEMP_CRITICAL_C = 80.0
 CURRENT_CRITICAL_A = 20.0
+
+TREND_WINDOW = 12      # nombre de mesures gardées par nœud (≈ 1 min à 5 s)
+TREND_MIN_POINTS = 6   # minimum de mesures avant de calculer une tendance
+SMOOTH_K = 3           # fenêtre de la moyenne mobile
+ETA_MAX_MIN = 120      # au-delà, on n'affiche pas de temps estimé
 
 
 def init_db():
@@ -80,7 +86,48 @@ def build_features(current, voltage, temperature, model_columns):
             features[col] = 0.0
     return np.array([[features[c] for c in model_columns]])
 
+history_buffers = {}
 
+
+def slope_and_eta(times_min, values, threshold):
+    """Pente (unité/min) après lissage + temps estimé avant le seuil."""
+    k = SMOOTH_K
+    v = np.array(values, dtype=float)
+    t = np.array(times_min, dtype=float)
+    if len(v) >= k:
+        v = np.convolve(v, np.ones(k) / k, mode="valid")  # moyenne mobile
+        t = t[k - 1:]
+    if len(v) < 3 or t[-1] - t[0] <= 0:
+        return None, None
+    slope = float(np.polyfit(t, v, 1)[0])
+    eta = None
+    if slope > 0.05:
+        eta = max(0.0, (threshold - float(v[-1])) / slope)
+        if eta > ETA_MAX_MIN:
+            eta = None
+    return slope, eta
+
+
+def _r(x):
+    return None if x is None else round(x, 2)
+
+
+def compute_trend(node_id, temperature, current):
+    buf = history_buffers.setdefault(node_id, deque(maxlen=TREND_WINDOW))
+    buf.append((time.time(), temperature, current))
+    if len(buf) < TREND_MIN_POINTS:
+        return {
+            "temp_slope_per_min": None, "temp_eta_min": None,
+            "current_slope_per_min": None, "current_eta_min": None,
+        }
+    t0 = buf[0][0]
+    times = [(b[0] - t0) / 60.0 for b in buf]
+    t_slope, t_eta = slope_and_eta(times, [b[1] for b in buf], TEMP_CRITICAL_C)
+    c_slope, c_eta = slope_and_eta(times, [b[2] for b in buf], CURRENT_CRITICAL_A)
+    return {
+        "temp_slope_per_min": _r(t_slope), "temp_eta_min": _r(t_eta),
+        "current_slope_per_min": _r(c_slope), "current_eta_min": _r(c_eta),
+    }
 model = None
 model_columns = None
 
@@ -115,7 +162,7 @@ def on_message(client, userdata, msg):
     print(f"[{node_id}] I={current:.2f}A V={voltage:.1f}V T={temperature:.1f}C -> {prediction} ({confidence:.2f})")
 
     save_measurement(node_id, current, voltage, temperature, prediction, confidence)
-
+    trend = compute_trend(node_id, temperature, current)
     alert_payload = json.dumps({
         "node_id": node_id,
         "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -124,6 +171,7 @@ def on_message(client, userdata, msg):
         "temperature_C": temperature,
         "prediction": prediction,
         "confidence": confidence,
+                **trend,
     })
     client.publish(MQTT_TOPIC_PUB, alert_payload)
 
