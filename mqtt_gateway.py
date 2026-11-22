@@ -38,6 +38,15 @@ def init_db():
             confidence REAL
         )
     """)
+        conn.execute("""
+        CREATE TABLE IF NOT EXISTS alarms (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            node_id TEXT,
+            timestamp TEXT,
+            type TEXT,
+            message TEXT
+        )
+    """)
     conn.commit()
     conn.close()
 
@@ -61,7 +70,40 @@ def save_measurement(node_id, current, voltage, temperature, prediction, confide
     conn.commit()
     conn.close()
 
+last_alarm_type = {}
 
+
+def alarm_type(prediction, warning_level):
+    if prediction == "PANNE":
+        return "PANNE"
+    if warning_level == "ALERTE":
+        return "ALERTE"
+    if warning_level == "ATTENTION":
+        return "ATTENTION"
+    if prediction == "ANOMALIE":
+        return "ANOMALIE"
+    return "NORMAL"
+
+
+def log_alarm_if_changed(node_id, prediction, trend, current, voltage, temperature):
+    """Enregistre une alarme seulement quand l'etat du noeud change."""
+    atype = alarm_type(prediction, trend["warning_level"])
+    prev = last_alarm_type.get(node_id)
+    last_alarm_type[node_id] = atype
+    if prev == atype or (prev is None and atype == "NORMAL"):
+        return
+    msg = f"T={temperature:.1f} °C · I={current:.2f} A · V={voltage:.0f} V"
+    if atype in ("ALERTE", "ATTENTION") and trend["eta_min"] is not None:
+        msg += f" · seuil ({trend['eta_cause']}) dans {trend['eta_min']} min"
+    if atype == "NORMAL":
+        msg = "Retour à la normale · " + msg
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    conn.execute(
+        "INSERT INTO alarms (node_id, timestamp, type, message) VALUES (?, ?, ?, ?)",
+        (node_id, datetime.now(timezone.utc).isoformat(), atype, msg),
+    )
+    conn.commit()
+    conn.close()
 def load_model():
     if not MODEL_PATH.exists():
         raise FileNotFoundError(f"Modele introuvable: {MODEL_PATH}")
@@ -203,6 +245,7 @@ def on_message(client, userdata, msg):
           + (f" (seuil dans {trend['eta_min']} min, cause: {trend['eta_cause']})" if trend["eta_min"] is not None else ""))
 
     save_measurement(node_id, current, voltage, temperature, prediction, confidence)
+        log_alarm_if_changed(node_id, prediction, trend, current, voltage, temperature)
 
     alert_payload = json.dumps({
         "node_id": node_id,
@@ -302,7 +345,21 @@ def recent():
     conn.close()
 
     return jsonify({"count": len(rows), "results": [dict(r) for r in rows]})
-def run_flask():
+@app.route("/api/alarms")
+def list_alarms():
+    """Journal d'alarmes (changements d'etat). Exemple : /api/alarms?limit=200"""
+    try:
+        limit = min(int(request.args.get("limit", 200)), 1000)
+    except ValueError:
+        limit = 200
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute(
+        "SELECT node_id, timestamp, type, message FROM alarms ORDER BY id DESC LIMIT ?",
+        (limit,),
+    ).fetchall()
+    conn.close()
+    return jsonify({"count": len(rows), "results": [dict(r) for r in rows]})def run_flask():
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
 
