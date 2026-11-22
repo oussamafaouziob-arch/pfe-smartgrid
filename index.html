@@ -7,6 +7,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet">
 <script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 <style>
   :root {
     --bg: #eef4fb;
@@ -514,6 +515,7 @@ function handlePayload(data) {
   statusMeta.textContent = 'confiance ' + confidence + ' · ' + (data.node_id || '');
 
   updateEarlyWarning(data);
+    if (window.updateInsights) updateInsights(data);
 
   logs.unshift({ time: fmtTime(data.timestamp), prediction, current, voltage, temp });
   if (logs.length > 25) logs.pop();
@@ -615,6 +617,111 @@ async function fetchHistory() {
     apiNote.textContent = "⚠ Impossible de joindre l'API. Vérifie l'URL et que la gateway tourne bien.";
   }
 }
+  // ================== INSIGHTS : courbe température + health score ==================
+(function () {
+  const css = `
+    .insights { display: grid; grid-template-columns: 2fr 1fr; gap: 16px; margin-bottom: 20px; }
+    @media (max-width: 720px) { .insights { grid-template-columns: 1fr; } }
+    .chart-wrap { position: relative; height: 260px; }
+    .hs-good { --hs: var(--blue); }
+    .hs-warn { --hs: var(--amber); }
+    .hs-bad  { --hs: var(--red); }
+    .hs-score { font-size: 48px; font-weight: 600; line-height: 1; color: var(--hs); }
+    .hs-label { font-size: 12px; letter-spacing: 0.1em; margin-top: 8px; font-weight: 600; color: var(--hs); }
+    .hs-detail { font-size: 11px; color: var(--text-dim); margin-top: 14px; line-height: 1.7; }
+    #hsBar { background: var(--hs); box-shadow: none; }
+  `;
+  const style = document.createElement('style');
+  style.textContent = css;
+  document.head.appendChild(style);
+
+  const box = document.createElement('div');
+  box.className = 'insights';
+  box.innerHTML = `
+    <div class="panel" style="--accent: var(--amber)">
+      <div class="panel-label"><span>Température : historique &amp; prévision</span><b id="chartNode">NODE</b></div>
+      <div class="chart-wrap"><canvas id="tempChart"></canvas></div>
+    </div>
+    <div class="panel hs-good" id="hsPanel" style="--accent: var(--hs)">
+      <div class="panel-label"><span>Health score</span><b id="hsNode">—</b></div>
+      <div class="hs-score" id="hsScore">--</div>
+      <div class="hs-label" id="hsLabel">EN ATTENTE</div>
+      <div class="bar-track"><div class="bar-fill" id="hsBar"></div></div>
+      <div class="hs-detail" id="hsDetail">Calcul en cours...</div>
+    </div>`;
+  document.querySelector('.log-panel').before(box);
+
+  Chart.defaults.font.family = "'IBM Plex Mono', monospace";
+  const THRESHOLD = 80;
+  const WINDOW_MIN = 5;      // minutes d'historique affichées
+  const FORECAST_MAX = 15;   // minutes de prévision affichées au maximum
+  const points = [];
+  const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+
+  const chart = new Chart(document.getElementById('tempChart'), {
+    type: 'line',
+    data: { datasets: [
+      { label: 'Température', data: [], borderColor: '#d98a1f', backgroundColor: 'rgba(217,138,31,0.12)', fill: true, pointRadius: 0, borderWidth: 2, tension: 0.25 },
+      { label: 'Prévision', data: [], borderColor: '#dc3b3b', borderDash: [6, 4], pointRadius: 0, borderWidth: 2 },
+      { label: 'Seuil 80 °C', data: [], borderColor: '#55698a', borderDash: [2, 3], pointRadius: 0, borderWidth: 1.5 }
+    ]},
+    options: {
+      animation: false, responsive: true, maintainAspectRatio: false, parsing: false,
+      scales: {
+        x: { type: 'linear', title: { display: true, text: 'minutes (0 = maintenant)' } },
+        y: { min: 0, max: 100, title: { display: true, text: '°C' } }
+      },
+      plugins: { legend: { labels: { boxWidth: 18, font: { size: 11 } } } }
+    }
+  });
+
+  window.updateInsights = function (data) {
+    const temp = Number(data.temperature_C ?? 0);
+    const current = Number(data.current_A ?? 0);
+    const now = Date.now();
+
+    // ---- Courbe + prévision ----
+    points.push({ t: now, y: temp });
+    if (points.length > 400) points.shift();
+    const hist = points.map(p => ({ x: (p.t - now) / 60000, y: p.y })).filter(p => p.x >= -WINDOW_MIN);
+
+    const slope = data.trend_temp_per_min;
+    let xEnd = 2, forecast = [];
+    if (typeof slope === 'number' && slope > 0 && temp < THRESHOLD) {
+      const eta = (THRESHOLD - temp) / slope;
+      xEnd = Math.min(eta, FORECAST_MAX);
+      forecast = [{ x: 0, y: temp }, { x: xEnd, y: Math.min(100, temp + slope * xEnd) }];
+      xEnd += 0.5;
+    }
+    const xMin = Math.min(-1, hist[0].x);
+    chart.data.datasets[0].data = hist;
+    chart.data.datasets[1].data = forecast;
+    chart.data.datasets[2].data = [{ x: xMin, y: THRESHOLD }, { x: xEnd, y: THRESHOLD }];
+    chart.options.scales.x.min = xMin;
+    chart.options.scales.x.max = xEnd;
+    chart.update('none');
+    document.getElementById('chartNode').textContent = data.node_id || 'NODE';
+
+    // ---- Health score (0-100) ----
+    const state = data.prediction || 'NORMAL';
+    const level = data.warning_level || 'NONE';
+    const pState = state === 'PANNE' ? 50 : state === 'ANOMALIE' ? 25 : 0;
+    const pTemp = Math.round(30 * clamp((temp - 40) / 40, 0, 1));      // 40 °C -> 80 °C
+    const pCur = Math.round(20 * clamp((current - 10) / 10, 0, 1));    // 10 A -> 20 A
+    const pTrend = level === 'ALERTE' ? 15 : level === 'ATTENTION' ? 8 : 0;
+    const score = clamp(100 - pState - pTemp - pCur - pTrend, 0, 100);
+
+    const cls = score >= 75 ? 'good' : score >= 45 ? 'warn' : 'bad';
+    const label = score >= 75 ? 'BON' : score >= 45 ? 'À SURVEILLER' : 'CRITIQUE';
+    document.getElementById('hsPanel').className = 'panel hs-' + cls;
+    document.getElementById('hsScore').textContent = score;
+    document.getElementById('hsLabel').textContent = label;
+    document.getElementById('hsBar').style.width = score + '%';
+    document.getElementById('hsNode').textContent = data.node_id || '—';
+    document.getElementById('hsDetail').textContent =
+      'Pénalités : état −' + pState + ' · température −' + pTemp + ' · courant −' + pCur + ' · tendance −' + pTrend;
+  };
+})();
 </script>
 </body>
 </html>
