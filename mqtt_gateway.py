@@ -87,8 +87,8 @@ def build_features(current, voltage, temperature, model_columns):
 # de minutes" il sera atteint si la tendance actuelle continue (extrapolation
 # lineaire sur les derniers points). Ce n'est PAS un modele de ML de prevision.
 
-WINDOW_SIZE = 12          # nombre de dernieres mesures gardees par noeud (12 x 5 s = 1 min)
-MIN_POINTS = 6            # nombre minimal de mesures avant de calculer une tendance
+WINDOW_SIZE = 60          # nombre de dernieres mesures gardees par noeud (12 x 5 s = 1 min)
+MIN_POINTS = 15            # nombre minimal de mesures avant de calculer une tendance
 HORIZON_MAX_MIN = 120     # au-dela de 2 h, on considere qu'il n'y a pas de risque proche
 WARN_ATTENTION_MIN = 30   # niveau ATTENTION si seuil estime dans 30 min ou moins
 WARN_ALERTE_MIN = 15      # niveau ALERTE si seuil estime dans 15 min ou moins
