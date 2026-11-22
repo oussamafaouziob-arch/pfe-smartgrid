@@ -5,7 +5,7 @@ import threading
 import time
 from collections import deque, defaultdict
 from pathlib import Path
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import joblib
 import numpy as np
@@ -283,7 +283,25 @@ def history():
 
     return jsonify({"count": len(results), "summary": summary, "results": results})
 
+@app.route("/api/recent")
+def recent():
+    """Dernieres mesures (pour recharger la vue en direct). Exemple : /api/recent?minutes=10"""
+    try:
+        minutes = min(int(request.args.get("minutes", 10)), 60)
+    except ValueError:
+        minutes = 10
+    since = (datetime.now(timezone.utc) - timedelta(minutes=minutes)).isoformat()
 
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute(
+        """SELECT node_id, timestamp, current_A, voltage_V, temperature_C, prediction, confidence
+           FROM measurements WHERE timestamp >= ? ORDER BY timestamp ASC""",
+        (since,),
+    ).fetchall()
+    conn.close()
+
+    return jsonify({"count": len(rows), "results": [dict(r) for r in rows]})
 def run_flask():
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
