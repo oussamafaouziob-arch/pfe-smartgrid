@@ -675,13 +675,16 @@ async function fetchHistory() {
     }
   });
 
+    window.seedInsights = function (rows) {
+    rows.forEach(r => points.push({ t: Date.parse(r.timestamp), y: Number(r.temperature_C) }));
+  };
   window.updateInsights = function (data) {
     const temp = Number(data.temperature_C ?? 0);
     const current = Number(data.current_A ?? 0);
     const now = Date.now();
 
     // ---- Courbe + prévision ----
-    points.push({ t: now, y: temp });
+        points.push({ t: data.timestamp ? Date.parse(data.timestamp) : now, y: temp });
     if (points.length > 400) points.shift();
     const hist = points.map(p => ({ x: (p.t - now) / 60000, y: p.y })).filter(p => p.x >= -WINDOW_MIN);
 
@@ -722,6 +725,41 @@ async function fetchHistory() {
       'Pénalités : état −' + pState + ' · température −' + pTemp + ' · courant −' + pCur + ' · tendance −' + pTrend;
   };
 })();
+  // ================== RESTAURATION APRES RAFRAICHISSEMENT ==================
+async function restoreRecent() {
+  try {
+    const res = await fetch(`${CONFIG.API_URL}/api/recent?minutes=10`);
+    const data = await res.json();
+    const rows = data.results || [];
+    if (!rows.length || msgCount > 0) return;
+
+    rows.forEach(r => logs.unshift({
+      time: fmtTime(r.timestamp), prediction: r.prediction,
+      current: Number(r.current_A), voltage: Number(r.voltage_V), temp: Number(r.temperature_C)
+    }));
+    logs.length = Math.min(logs.length, 25);
+    msgCount = rows.length;
+    renderLog();
+
+    const last = rows[rows.length - 1];
+    document.getElementById('valCurrent').textContent = Number(last.current_A).toFixed(2);
+    document.getElementById('valVoltage').textContent = Number(last.voltage_V).toFixed(1);
+    document.getElementById('valTemp').textContent = Number(last.temperature_C).toFixed(1);
+    setBar('barCurrent', Number(last.current_A), 30);
+    setBar('barVoltage', Number(last.voltage_V), 250);
+    setBar('barTemp', Number(last.temperature_C), 100);
+    statusBanner.className = 'status-banner state-' + last.prediction.toLowerCase();
+    statusBadge.textContent = last.prediction;
+    statusDesc.textContent = descriptions[last.prediction] || '';
+    statusMeta.textContent = 'confiance ' + (last.confidence * 100).toFixed(0) + '% · ' + last.node_id;
+
+    if (window.seedInsights) seedInsights(rows.slice(0, -1));
+    if (window.updateInsights) updateInsights(last);
+  } catch (e) {
+    console.error('Restauration impossible', e);
+  }
+}
+restoreRecent();
 </script>
 </body>
 </html>
