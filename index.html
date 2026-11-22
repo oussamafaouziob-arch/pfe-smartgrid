@@ -276,6 +276,9 @@
   .history-table tbody tr:hover { background: #f6faff; }
   .hist-empty { padding: 30px; text-align: center; color: var(--text-faint); font-size: 12.5px; }
   .api-note { font-size: 11px; color: var(--text-faint); margin-top: 10px; }
+    .trend { margin-top: 12px; font-size: 11.5px; color: var(--text-dim); min-height: 16px; }
+  .trend.warn { color: var(--amber); font-weight: 600; }
+  .trend.alert { color: var(--red); font-weight: 600; }
 </style>
 </head>
 <body>
@@ -311,6 +314,7 @@
         <div class="reading"><span id="valCurrent">--</span><span class="unit">A</span></div>
         <div class="bar-track"><div class="bar-fill" id="barCurrent"></div></div>
         <div class="bar-range"><span>0</span><span>30 A</span></div>
+                <div class="trend" id="trendCurrent"></div>
       </div>
       <div class="panel" id="panel-voltage">
         <div class="panel-label"><span>Tension</span><b>NODE 1</b></div>
@@ -323,6 +327,7 @@
         <div class="reading"><span id="valTemp">--</span><span class="unit">°C</span></div>
         <div class="bar-track"><div class="bar-fill" id="barTemp"></div></div>
         <div class="bar-range"><span>0</span><span>100 °C</span></div>
+                <div class="trend" id="trendTemp"></div>
       </div>
     </div>
 
@@ -436,7 +441,8 @@ function handlePayload(data) {
   setBar('barCurrent', current, 30);
   setBar('barVoltage', voltage, 250);
   setBar('barTemp', temp, 100);
-
+  updateTrend('trendTemp', data.temp_slope_per_min, data.temp_eta_min, '°C');
+  updateTrend('trendCurrent', data.current_slope_per_min, data.current_eta_min, 'A');
   statusBanner.className = 'status-banner state-' + prediction.toLowerCase();
   statusBadge.textContent = prediction;
   statusDesc.textContent = descriptions[prediction] || '';
@@ -448,6 +454,19 @@ function handlePayload(data) {
 }
 
 function renderLog() {
+  function updateTrend(id, slope, eta, unit) {
+  const el = document.getElementById(id);
+  if (slope == null) { el.textContent = ''; el.className = 'trend'; return; }
+  let txt = slope > 0.05 ? '↗ en hausse' : slope < -0.05 ? '↘ en baisse' : '→ stable';
+  txt += ' (' + slope.toFixed(2) + ' ' + unit + '/min)';
+  let cls = 'trend';
+  if (eta != null) {
+    txt += ' · seuil estimé dans ' + Math.round(eta) + ' min';
+    cls += eta <= 15 ? ' alert' : eta <= 30 ? ' warn' : '';
+  }
+  el.textContent = txt;
+  el.className = cls;
+}
   logCount.textContent = msgCount + ' messages';
   if (logs.length === 0) {
     logList.innerHTML = '<div class="log-empty">Aucun événement reçu pour le moment.</div>';
